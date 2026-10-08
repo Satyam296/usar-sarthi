@@ -14,7 +14,7 @@ backend/     Express API, MongoDB/Mongoose, admin authentication, uploads
 ai-service/  Django REST Framework, pdfplumber, sentence-transformers, local SQLite vector store
 ```
 
-The browser calls Express. Express owns authentication and document metadata, then calls Django for ingestion, retrieval, and vector deletion. The local setup shares `backend/uploads` with Django through the file path passed to `/ingest`. Django calls Express back to update the document status.
+The browser calls Express. Express owns authentication and document metadata; uploaded files are held in memory only and streamed straight through to Django's `/ingest` endpoint as the request body (never written to disk), so the two services don't need to share a filesystem — they can run on completely separate hosts. Django calls Express back to update the document status.
 
 Embeddings are **not** stored in an external vector database. Django's own `db.sqlite3` holds a `DocumentChunk` table (chunk text + a JSON-encoded embedding vector per row), and retrieval does a brute-force cosine-similarity scan over that table with NumPy. That's simple and fully local — no API key, no account signup — and is plenty fast for an admin knowledge base of up to a few thousand chunks. If the corpus ever grows well beyond that, swap in a real vector database (Pinecone, Qdrant, pgvector, etc.) behind the same `upsert_chunks` / `delete_document_vectors` / `retrieve_chunks` functions in `ai-service/knowledge/services.py` — nothing else in the stack needs to change.
 
@@ -35,10 +35,10 @@ Set these values:
 | Service | Variables |
 | --- | --- |
 | Backend | `MONGO_URI`, `JWT_SECRET`, `DJANGO_SERVICE_URL`, `PORT`, `BACKEND_CALLBACK_SECRET`, `AI_SERVICE_SECRET`; `FRONTEND_URL` defaults to `http://localhost:5173` |
-| AI service | `BACKEND_URL`, `BACKEND_CALLBACK_SECRET`, `AI_SERVICE_SECRET`; `BACKEND_UPLOADS_DIR` and `DJANGO_SECRET_KEY` are also provided |
+| AI service | `BACKEND_URL`, `BACKEND_CALLBACK_SECRET`, `AI_SERVICE_SECRET`, `DJANGO_SECRET_KEY`; `DATABASE_URL` and `DJANGO_ALLOWED_HOSTS` are also provided (leave `DATABASE_URL` empty for local SQLite) |
 | Frontend | `VITE_API_URL`, normally `http://127.0.0.1:5000/api` |
 
-Use the same `BACKEND_CALLBACK_SECRET` in backend and AI service, and the same `AI_SERVICE_SECRET` in both. Set strong, unique values in local `.env` files; the example values are placeholders. The backend upload directory is `backend/uploads`. If you change it, point `BACKEND_UPLOADS_DIR` at that same directory.
+Use the same `BACKEND_CALLBACK_SECRET` in backend and AI service, and the same `AI_SERVICE_SECRET` in both. Set strong, unique values in local `.env` files; the example values are placeholders.
 
 ## Run locally on Windows
 
@@ -108,8 +108,66 @@ Then sign in at `http://localhost:5173/login` with that email and password. Pass
 - `POST /api/auth/login` — return a 12-hour JWT
 - `POST /api/documents/upload` — admin-only multipart upload (`title`, `department`, `category`, `file`)
 - `GET /api/documents` — admin-only document inventory
-- `DELETE /api/documents/:id` — delete the document's chunks from the local vector store, its MongoDB metadata, and the uploaded file
+- `DELETE /api/documents/:id` — delete the document's chunks from the local vector store and its MongoDB metadata
 - `POST /api/documents/retrieve` — admin-only top-K retrieval test; body `{ "query": "...", "topK": 3 }`
 - `POST /ingest`, `POST /delete-vectors`, `POST /retrieve` — Django service operations, protected by `AI_SERVICE_SECRET`
 
 The Django ingestion callback updates status through the backend's internal endpoint using `BACKEND_CALLBACK_SECRET`. A failed vector-store deletion leaves the MongoDB record intact so cleanup can be retried.
+
+## Deploying (Netlify + Render + MongoDB Atlas)
+
+This is three separate pieces of hosting, not one. Netlify only serves the static frontend — the Express API and the Django AI service are both long-running servers, so each needs its own host (Render works for both; Railway/Fly are equally fine). You'll also need a real MongoDB connection string, since there's no MongoDB on Render — [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) has a free M0 tier that's plenty for this.
+
+| Piece | Host | Notes |
+| --- | --- | --- |
+| `frontend/` | Netlify | Static build. `netlify.toml` at the repo root already sets the base directory, build command, and the SPA redirect React Router needs. |
+| `backend/` | Render (Web Service, Node) | Stateless — no disk needed anymore. |
+| `ai-service/` | Render (Web Service, Python) | Stateless too, as long as `DATABASE_URL` points at a real Postgres (see below). |
+| MongoDB | MongoDB Atlas (free M0) | Metadata only: users, document records. |
+| Vector store | Render Postgres (free) | Holds the `DocumentChunk` table in place of local SQLite — see below. |
+
+### 1. MongoDB Atlas
+
+Create a free M0 cluster, create a database user, and allow network access from anywhere (0.0.0.0/0 is fine for a project like this). Copy the connection string — that's your `MONGO_URI`.
+
+### 2. Render Postgres (replaces local SQLite for the vector store)
+
+Create a new **Postgres** instance on Render (free tier). Once it's up, copy its **Internal Database URL** (if the AI service will also live on Render — internal URLs are faster and don't count against bandwidth) or the **External Database URL** (if it's hosted elsewhere). This becomes `DATABASE_URL` for the AI service. The same `DocumentChunk` model and cosine-similarity retrieval code run unchanged against Postgres — only the connection string changes (see `ai-service/campus_ai/settings.py`).
+
+### 3. Django AI service → Render Web Service
+
+- **Root directory:** `ai-service`
+- **Runtime:** Python 3
+- **Build command:** `pip install -r requirements.txt && python manage.py migrate`
+- **Start command:** `gunicorn campus_ai.wsgi:application --bind 0.0.0.0:$PORT`
+- **Environment variables:** `DATABASE_URL` (from step 2), `DJANGO_SECRET_KEY` (any long random string), `DJANGO_ALLOWED_HOSTS` (the service's own `*.onrender.com` hostname), `BACKEND_URL` (the Express service's URL from step 4), `BACKEND_CALLBACK_SECRET`, `AI_SERVICE_SECRET` (both must exactly match what you set on the backend)
+
+`gunicorn` only runs on Linux, so you won't be able to test this exact start command on Windows locally — that's expected, Render's containers are Linux. Local dev keeps using `manage.py runserver` as before; nothing about the local workflow changes.
+
+### 4. Express backend → Render Web Service
+
+- **Root directory:** `backend`
+- **Runtime:** Node
+- **Build command:** `npm install`
+- **Start command:** `npm start`
+- **Environment variables:** `MONGO_URI` (from step 1), `JWT_SECRET` (any long random string), `DJANGO_SERVICE_URL` (the AI service's URL from step 3), `BACKEND_CALLBACK_SECRET`, `AI_SERVICE_SECRET` (matching step 3), `FRONTEND_URL` (the Netlify URL from step 5 — needed for CORS)
+
+Don't set `PORT` yourself — Render injects it, and `server.js` already reads `process.env.PORT`.
+
+### 5. React frontend → Netlify
+
+Connect the GitHub repo in Netlify; it will pick up `netlify.toml` automatically. Add one environment variable in Netlify's site settings before the first deploy:
+
+- `VITE_API_URL` → the Express service's URL from step 4, with `/api` appended (e.g. `https://usar-sarthi-backend.onrender.com/api`)
+
+Vite bakes environment variables in at build time, so if you add/change this after the first deploy, trigger a new deploy for it to take effect.
+
+### 6. Wire the circular references and redeploy
+
+Steps 3 and 4 each reference the other's URL, which you won't know until both services exist once. Create both first (even with a placeholder), then go back and fill in `DJANGO_SERVICE_URL` (on the backend) and `BACKEND_URL` (on the AI service) with the real `https://...onrender.com` addresses, then redeploy both. Same for `FRONTEND_URL` once Netlify gives you its URL.
+
+### Known free-tier quirks
+
+- **Cold starts:** Render's free web services spin down after ~15 minutes idle and take 30–60s to wake on the next request. The AI service is slower to wake than the backend, since it also has to re-load the embedding model into memory.
+- **Models re-download after a restart:** `all-MiniLM-L6-v2` (~90 MB) and EasyOCR's English model (~65 MB) are cached to local disk at runtime, which is ephemeral on Render's free tier — so each cold start/redeploy re-downloads them. The first request after a restart will be noticeably slower than the rest; that's expected, not a hang.
+- **Upload size vs. request timeouts:** free-tier Render services can have tighter request timeouts than the 5-minute one configured in `documents.js`. If a large scanned PDF's OCR run doesn't finish in time, consider trimming page count or upgrading the AI service's plan.

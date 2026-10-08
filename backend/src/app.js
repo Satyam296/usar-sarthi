@@ -1,6 +1,5 @@
 import cors from 'cors';
 import express from 'express';
-import path from 'node:path';
 import authRoutes from './routes/auth.js';
 import documentRoutes from './routes/documents.js';
 import internalRoutes from './routes/internal.js';
@@ -15,5 +14,4 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/internal', internalRoutes);
 app.use(errorHandler);
 
-export const uploadDirectory = path.resolve(process.cwd(), 'uploads');
 export default app;

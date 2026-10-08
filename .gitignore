@@ -1,7 +1,6 @@
 node_modules/
 .venv/
 frontend/dist/
-backend/uploads/
 backend/.env
 ai-service/.env
 frontend/.env

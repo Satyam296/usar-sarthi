@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from .services import chunk_pages, delete_document_vectors, read_document, retrieve_chunks, upsert_chunks
 
 logger = logging.getLogger(__name__)
+ALLOWED_EXTENSIONS = {'.pdf', '.txt'}
 
 
 class ServiceSecretPermission(BasePermission):
@@ -35,18 +36,19 @@ class IngestView(APIView):
     permission_classes = [ServiceSecretPermission]
 
     def post(self, request):
-        file_path_value = request.data.get('filePath')
         document_id = request.data.get('documentId')
         source = str(request.data.get('source') or 'Uploaded document')[:200]
-        if not file_path_value or not document_id:
-            return Response({'message': 'filePath and documentId are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file or not document_id:
+            return Response({'message': 'file and documentId are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        file_path = Path(file_path_value).resolve()
-        if not file_path.is_relative_to(settings.BACKEND_UPLOADS_DIR) or not file_path.is_file():
-            return Response({'message': 'File is outside the configured upload directory or does not exist.'}, status=status.HTTP_400_BAD_REQUEST)
+        extension = Path(uploaded_file.name).suffix.lower()
+        if extension not in ALLOWED_EXTENSIONS:
+            return Response({'message': 'Only PDF and TXT files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            pages = read_document(file_path)
+            file_bytes = uploaded_file.read()
+            pages = read_document(file_bytes, extension)
             chunks = chunk_pages(pages)
             if not chunks:
                 raise ValueError('No readable text was found in the uploaded document.')

@@ -1,5 +1,5 @@
+import io
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import pdfplumber
@@ -33,20 +33,19 @@ def ocr_page_text(pdfium_document, page_index):
     return '\n'.join(lines).strip()
 
 
-def read_document(file_path: Path):
-    extension = file_path.suffix.lower()
+def read_document(file_bytes: bytes, extension: str):
     if extension == '.pdf':
         pages = []
         pdfium_document = None
         try:
-            with pdfplumber.open(file_path) as pdf:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 for page_number, page in enumerate(pdf.pages, start=1):
                     text = (page.extract_text() or '').strip()
                     if not text:
                         # No embedded text layer (e.g. a scanned or
                         # photographed notice) — fall back to OCR.
                         if pdfium_document is None:
-                            pdfium_document = pdfium.PdfDocument(file_path)
+                            pdfium_document = pdfium.PdfDocument(file_bytes)
                         text = ocr_page_text(pdfium_document, page_number - 1)
                     if text:
                         pages.append((text, page_number))
@@ -55,7 +54,7 @@ def read_document(file_path: Path):
                 pdfium_document.close()
         return pages
     if extension == '.txt':
-        text = file_path.read_text(encoding='utf-8-sig', errors='replace').strip()
+        text = file_bytes.decode('utf-8-sig', errors='replace').strip()
         return [(text, None)] if text else []
     raise ValueError('Only PDF and TXT files are supported.')
 

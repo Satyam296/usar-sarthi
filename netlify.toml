@@ -1,0 +1,10 @@
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+# Client-side routing (React Router): let the SPA handle every path.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
