@@ -1,0 +1,13 @@
+node_modules/
+.venv/
+frontend/dist/
+backend/uploads/
+backend/.env
+ai-service/.env
+frontend/.env
+ai-service/.venv/
+ai-service/__pycache__/
+ai-service/**/__pycache__/
+ai-service/*.py[cod]
+ai-service/db.sqlite3
+*.log
